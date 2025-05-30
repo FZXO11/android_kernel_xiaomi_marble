@@ -20,9 +20,6 @@
  * Lockless page tracking & accounting
  * Unified hierarchy configuration model
  * Copyright (C) 2015 Red Hat, Inc., Johannes Weiner
- *
- * Per memcg lru locking
- * Copyright (C) 2020 Alibaba, Inc, Alex Shi
  */
 
 #include <linux/page_counter.h>
@@ -1318,7 +1315,6 @@ int mem_cgroup_scan_tasks(struct mem_cgroup *memcg,
 {
 	struct mem_cgroup *iter;
 	int ret = 0;
-	int i = 0;
 
 	BUG_ON(memcg == root_mem_cgroup);
 
@@ -1327,12 +1323,8 @@ int mem_cgroup_scan_tasks(struct mem_cgroup *memcg,
 		struct task_struct *task;
 
 		css_task_iter_start(&iter->css, CSS_TASK_ITER_PROCS, &it);
-		while (!ret && (task = css_task_iter_next(&it))) {
-			/* Avoid potential softlockup warning */
-			if ((++i & 1023) == 0)
-				cond_resched();
+		while (!ret && (task = css_task_iter_next(&it)))
 			ret = fn(task, arg);
-		}
 		css_task_iter_end(&it);
 		if (ret) {
 			mem_cgroup_iter_break(memcg, iter);
@@ -1341,23 +1333,6 @@ int mem_cgroup_scan_tasks(struct mem_cgroup *memcg,
 	}
 	return ret;
 }
-
-#ifdef CONFIG_DEBUG_VM
-void lruvec_memcg_debug(struct lruvec *lruvec, struct page *page)
-{
-	struct mem_cgroup *memcg;
-
-	if (mem_cgroup_disabled())
-		return;
-
-	memcg = page_memcg(page);
-
-	if (!memcg)
-		VM_BUG_ON_PAGE(lruvec_memcg(lruvec) != root_mem_cgroup, page);
-	else
-		VM_BUG_ON_PAGE(lruvec_memcg(lruvec) != memcg, page);
-}
-#endif
 
 /**
  * mem_cgroup_page_lruvec - return lruvec for isolating/putting an LRU page
@@ -1399,60 +1374,6 @@ out:
 	return lruvec;
 }
 
-/**
- * lock_page_lruvec - lock and return lruvec for a given page.
- * @page: the page
- *
- * This series functions should be used in either conditions:
- * PageLRU is cleared or unset
- * or page->_refcount is zero
- * or page is locked.
- */
-struct lruvec *lock_page_lruvec(struct page *page)
-{
-	struct lruvec *lruvec;
-	struct pglist_data *pgdat = page_pgdat(page);
-
-	rcu_read_lock();
-	lruvec = mem_cgroup_page_lruvec(page, pgdat);
-	spin_lock(&lruvec->lru_lock);
-	rcu_read_unlock();
-
-	lruvec_memcg_debug(lruvec, page);
-
-	return lruvec;
-}
-
-struct lruvec *lock_page_lruvec_irq(struct page *page)
-{
-	struct lruvec *lruvec;
-	struct pglist_data *pgdat = page_pgdat(page);
-
-	rcu_read_lock();
-	lruvec = mem_cgroup_page_lruvec(page, pgdat);
-	spin_lock_irq(&lruvec->lru_lock);
-	rcu_read_unlock();
-
-	lruvec_memcg_debug(lruvec, page);
-
-	return lruvec;
-}
-
-struct lruvec *lock_page_lruvec_irqsave(struct page *page, unsigned long *flags)
-{
-	struct lruvec *lruvec;
-	struct pglist_data *pgdat = page_pgdat(page);
-
-	rcu_read_lock();
-	lruvec = mem_cgroup_page_lruvec(page, pgdat);
-	spin_lock_irqsave(&lruvec->lru_lock, *flags);
-	rcu_read_unlock();
-
-	lruvec_memcg_debug(lruvec, page);
-
-	return lruvec;
-}
-
 struct lruvec *page_to_lruvec(struct page *page, pg_data_t *pgdat)
 {
 	struct lruvec *lruvec;
@@ -1470,6 +1391,7 @@ void do_traversal_all_lruvec(void)
 	for_each_online_pgdat(pgdat) {
 		struct mem_cgroup *memcg = NULL;
 
+		spin_lock_irq(&pgdat->lru_lock);
 		memcg = mem_cgroup_iter(NULL, NULL, NULL);
 		do {
 			struct lruvec *lruvec = mem_cgroup_lruvec(memcg, pgdat);
@@ -1478,6 +1400,8 @@ void do_traversal_all_lruvec(void)
 
 			memcg = mem_cgroup_iter(NULL, memcg, NULL);
 		} while (memcg);
+
+		spin_unlock_irq(&pgdat->lru_lock);
 	}
 }
 EXPORT_SYMBOL_GPL(do_traversal_all_lruvec);
@@ -2258,12 +2182,6 @@ again:
 	if (unlikely(!memcg))
 		return NULL;
 
-#ifdef CONFIG_PROVE_LOCKING
-	local_irq_save(flags);
-	might_lock(&memcg->move_lock);
-	local_irq_restore(flags);
-#endif
-
 	if (atomic_read(&memcg->moving_account) <= 0)
 		return memcg;
 
@@ -3000,6 +2918,7 @@ static void commit_charge(struct page *page, struct mem_cgroup *memcg)
 	 * - LRU isolation
 	 * - lock_page_memcg()
 	 * - exclusive reference
+	 * - mem_cgroup_trylock_pages()
 	 */
 	page->mem_cgroup = memcg;
 }
@@ -5002,12 +4921,9 @@ static ssize_t memcg_write_event_control(struct kernfs_open_file *of,
 	buf = endp + 1;
 
 	cfd = simple_strtoul(buf, &endp, 10);
-	if (*endp == '\0')
-		buf = endp;
-	else if (*endp == ' ')
-		buf = endp + 1;
-	else
+	if ((*endp != ' ') && (*endp != '\0'))
 		return -EINVAL;
+	buf = endp + 1;
 
 	event = kzalloc(sizeof(*event), GFP_KERNEL);
 	if (!event)
@@ -5278,29 +5194,12 @@ static struct cftype mem_cgroup_legacy_files[] = {
  */
 
 static DEFINE_IDR(mem_cgroup_idr);
-static DEFINE_SPINLOCK(memcg_idr_lock);
-
-static int mem_cgroup_alloc_id(void)
-{
-	int ret;
-
-	idr_preload(GFP_KERNEL);
-	spin_lock(&memcg_idr_lock);
-	ret = idr_alloc(&mem_cgroup_idr, NULL, 1, MEM_CGROUP_ID_MAX + 1,
-			GFP_NOWAIT);
-	spin_unlock(&memcg_idr_lock);
-	idr_preload_end();
-	return ret;
-}
 
 static void mem_cgroup_id_remove(struct mem_cgroup *memcg)
 {
 	if (memcg->id.id > 0) {
 		trace_android_vh_mem_cgroup_id_remove(memcg);
-		spin_lock(&memcg_idr_lock);
 		idr_remove(&mem_cgroup_idr, memcg->id.id);
-		spin_unlock(&memcg_idr_lock);
-
 		memcg->id.id = 0;
 	}
 }
@@ -5407,6 +5306,7 @@ static void __mem_cgroup_free(struct mem_cgroup *memcg)
 
 static void mem_cgroup_free(struct mem_cgroup *memcg)
 {
+	lru_gen_exit_memcg(memcg);
 	memcg_wb_domain_exit(memcg);
 	/*
 	 * Flush percpu vmstats and vmevents to guarantee the value correctness
@@ -5432,7 +5332,9 @@ static struct mem_cgroup *mem_cgroup_alloc(void)
 	if (!memcg)
 		return ERR_PTR(error);
 
-	memcg->id.id = mem_cgroup_alloc_id();
+	memcg->id.id = idr_alloc(&mem_cgroup_idr, NULL,
+				 1, MEM_CGROUP_ID_MAX,
+				 GFP_KERNEL);
 	if (memcg->id.id < 0) {
 		error = memcg->id.id;
 		goto fail;
@@ -5478,9 +5380,8 @@ static struct mem_cgroup *mem_cgroup_alloc(void)
 	INIT_LIST_HEAD(&memcg->deferred_split_queue.split_queue);
 	memcg->deferred_split_queue.split_queue_len = 0;
 #endif
-	spin_lock(&memcg_idr_lock);
 	idr_replace(&mem_cgroup_idr, memcg, memcg->id.id);
-	spin_unlock(&memcg_idr_lock);
+	lru_gen_init_memcg(memcg);
 	trace_android_vh_mem_cgroup_alloc(memcg);
 	return memcg;
 fail:
@@ -6376,6 +6277,30 @@ static void mem_cgroup_move_task(void)
 }
 #endif
 
+#ifdef CONFIG_LRU_GEN
+static void mem_cgroup_attach(struct cgroup_taskset *tset)
+{
+	struct task_struct *task;
+	struct cgroup_subsys_state *css;
+
+	/* find the first leader if there is any */
+	cgroup_taskset_for_each_leader(task, css, tset)
+		break;
+
+	if (!task)
+		return;
+
+	task_lock(task);
+	if (task->mm && READ_ONCE(task->mm->owner) == task)
+		lru_gen_migrate_mm(task->mm);
+	task_unlock(task);
+}
+#else
+static void mem_cgroup_attach(struct cgroup_taskset *tset)
+{
+}
+#endif /* CONFIG_LRU_GEN */
+
 /*
  * Cgroup retains root cgroups across [un]mount cycles making it necessary
  * to verify whether we're attached to the default hierarchy on each mount
@@ -6728,6 +6653,7 @@ struct cgroup_subsys memory_cgrp_subsys = {
 	.css_free = mem_cgroup_css_free,
 	.css_reset = mem_cgroup_css_reset,
 	.can_attach = mem_cgroup_can_attach,
+	.attach = mem_cgroup_attach,
 	.cancel_attach = mem_cgroup_cancel_attach,
 	.post_attach = mem_cgroup_move_task,
 	.bind = mem_cgroup_bind,
