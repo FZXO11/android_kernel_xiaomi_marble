@@ -334,6 +334,17 @@ config SENSORS_BH1770
 	   To compile this driver as a module, choose M here: the
 	   module will be called bh1770glc. If unsure, say N here.
 
+config NTSYNC
+	tristate "NT synchronization primitive emulation"
+	help
+	  This module provides kernel support for emulation of Windows NT
+	  synchronization primitives. It is not a hardware driver.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called ntsync.
+
+	  If unsure, say N.
+
 config SENSORS_APDS990X
 	 tristate "APDS990X combined als and proximity sensors"
 	 depends on I2C
