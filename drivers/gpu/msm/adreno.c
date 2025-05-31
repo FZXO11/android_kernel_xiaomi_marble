@@ -435,7 +435,7 @@ static irqreturn_t adreno_freq_limiter_irq_handler(int irq, void *data)
 {
 	struct kgsl_device *device = data;
 	struct kgsl_pwrctrl *pwr = &device->pwrctrl;
-    /* don't spam
+    
 	dev_err_ratelimited(device->dev,
 		"Max GPU freq supported:%u, but requested freq:%u from prev freq:%u\n",
 		device->speed_bin ? (device->speed_bin - 2) * 4800000 :
@@ -443,7 +443,7 @@ static irqreturn_t adreno_freq_limiter_irq_handler(int irq, void *data)
 		pwr->pwrlevels[pwr->active_pwrlevel].gpu_freq,
 		pwr->pwrlevels[pwr->previous_pwrlevel].gpu_freq);
 
-	reset_control_reset(device->freq_limiter_irq_clear);*/
+	reset_control_reset(device->freq_limiter_irq_clear);
 
 	return IRQ_HANDLED;
 }
