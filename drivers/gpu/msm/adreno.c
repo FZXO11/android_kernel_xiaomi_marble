@@ -16,7 +16,7 @@
 #include <linux/msm_kgsl.h>
 #include <linux/regulator/consumer.h>
 #include <linux/nvmem-consumer.h>
-#include <linux/reset.h>
+//#include <linux/reset.h>
 #include <linux/soc/qcom/llcc-qcom.h>
 #include <linux/trace.h>
 #include <soc/qcom/dcvs.h>
@@ -429,23 +429,6 @@ static irqreturn_t adreno_irq_handler(int irq, void *data)
 	smp_mb__after_atomic();
 
 	return ret;
-}
-
-static irqreturn_t adreno_freq_limiter_irq_handler(int irq, void *data)
-{
-	struct kgsl_device *device = data;
-	struct kgsl_pwrctrl *pwr = &device->pwrctrl;
-    
-	dev_err_ratelimited(device->dev,
-		"Max GPU freq supported:%u, but requested freq:%u from prev freq:%u\n",
-		device->speed_bin ? (device->speed_bin - 2) * 4800000 :
-		pwr->pwrlevels[0].gpu_freq,
-		pwr->pwrlevels[pwr->active_pwrlevel].gpu_freq,
-		pwr->pwrlevels[pwr->previous_pwrlevel].gpu_freq);
-
-	reset_control_reset(device->freq_limiter_irq_clear);
-
-	return IRQ_HANDLED;
 }
 
 irqreturn_t adreno_irq_callbacks(struct adreno_device *adreno_dev,
@@ -971,7 +954,7 @@ static int adreno_read_speed_bin(struct platform_device *pdev)
 	memcpy(&val, buf, min(len, sizeof(val)));
 	kfree(buf);
 
-	return val;
+	return val+1;
 }
 
 static int adreno_read_gpu_model_fuse(struct platform_device *pdev)
@@ -1294,12 +1277,6 @@ int adreno_device_probe(struct platform_device *pdev,
 		goto err_unbind;
 
 	device->pwrctrl.interrupt_num = status;
-
-	device->freq_limiter_intr_num = kgsl_request_irq(pdev, "freq_limiter_irq",
-				adreno_freq_limiter_irq_handler, device);
-
-	device->freq_limiter_irq_clear =
-		devm_reset_control_get(&pdev->dev, "freq_limiter_irq_clear");
 
 	status = kgsl_device_platform_probe(device);
 	if (status)

@@ -316,10 +316,6 @@ struct kgsl_device {
 	bool pdev_loaded;
 	/** @nh: Pointer to head of the SRCU notifier chain */
 	struct srcu_notifier_head nh;
-	/** @freq_limiter_irq_clear: reset controller to clear freq limiter irq */
-	struct reset_control *freq_limiter_irq_clear;
-	/** @freq_limiter_intr_num: The interrupt number for freq limiter */
-	int freq_limiter_intr_num;
 	/** @bcl_data_kobj: Kobj for bcl_data sysfs node */
 	struct kobject bcl_data_kobj;
 	/** @idle_jiffies: Latest idle jiffies */
